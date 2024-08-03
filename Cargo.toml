@@ -1,0 +1,23 @@
+[package]
+name = "pbcat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+arboard = { version = "3.4.0", default-features = false, features = [
+    "windows-sys",
+]}
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = [
+    "env-filter",
+]}
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58.0", features = [
+    "Win32_System_DataExchange"
+]}
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSPasteboard"] }
