@@ -1,6 +1,18 @@
-use std::{io::Write as _, time::Duration};
+use std::{
+    io::{BufRead as _, Write as _},
+    time::Duration,
+};
+
+use clap::Parser;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Parser)]
+struct Options {
+    // Write to clipboard instead of reading from it.
+    #[arg(long)]
+    write: bool,
+}
 
 fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(
@@ -11,12 +23,23 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     tracing::info!("Initializing");
+    let options = Options::parse();
 
+    if options.write {
+        write_forever()?;
+    } else {
+        read_forever()?;
+    }
+
+    Ok(())
+}
+
+fn read_forever() -> Result<(), anyhow::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     let mut last_text: Option<String> = None;
     let mut last_update_count = get_update_count();
-
     tracing::info!("Started");
+
     loop {
         std::thread::sleep(POLL_INTERVAL);
         let current_update_count = get_update_count();
@@ -43,6 +66,31 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().flush()?;
 
         last_text = Some(current_text)
+    }
+}
+
+fn write_forever() -> Result<(), anyhow::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let mut buffer = Vec::<u8>::new();
+
+    loop {
+        let mut size = std::io::stdin().lock().read_until(b'\0', &mut buffer)?;
+
+        if size == 0 {
+            return Ok(());
+        }
+
+        if buffer[size - 1] == b'\0' {
+            size -= 1;
+        }
+
+        let text = String::from_utf8_lossy(&buffer[..size]);
+        let current_text = clipboard.get_text().ok();
+
+        if Some(text.as_ref()) != current_text.as_ref().map(|s| s.as_str()) {
+            tracing::debug!("Writing to clipboard");
+            clipboard.set_text(text)?;
+        }
     }
 }
 

@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 arboard = { version = "3.4.0", default-features = false, features = [
     "windows-sys",
 ]}
+clap = { version = "4.5.13", features = ["derive"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = [
     "env-filter",
