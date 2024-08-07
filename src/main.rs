@@ -53,7 +53,7 @@ fn get_update_count() -> u64 {
 
 #[cfg(target_os = "macos")]
 fn get_update_count() -> u64 {
-    unsafe { NSPasteboard.generalPasteboard().changeCount() as u64 }
+    unsafe { objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64 }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
