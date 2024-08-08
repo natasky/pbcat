@@ -22,7 +22,6 @@ fn main() -> anyhow::Result<()> {
             .finish(),
     )?;
 
-    tracing::info!("Initializing");
     let options = Options::parse();
 
     if options.write {
@@ -34,6 +33,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(level = "info")]
 fn read_forever() -> Result<(), anyhow::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     let mut last_text: Option<String> = None;
@@ -43,10 +43,10 @@ fn read_forever() -> Result<(), anyhow::Error> {
     loop {
         std::thread::sleep(POLL_INTERVAL);
         let current_update_count = get_update_count();
-        tracing::debug!(current_update_count);
+        tracing::trace!(current_update_count);
 
         if current_update_count == last_update_count {
-            tracing::debug!("No update");
+            tracing::trace!("No update");
             continue;
         }
 
@@ -69,14 +69,18 @@ fn read_forever() -> Result<(), anyhow::Error> {
     }
 }
 
+#[tracing::instrument(level = "info")]
 fn write_forever() -> Result<(), anyhow::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     let mut buffer = Vec::<u8>::new();
+    tracing::info!("Started");
 
     loop {
+        buffer.clear();
         let mut size = std::io::stdin().lock().read_until(b'\0', &mut buffer)?;
 
         if size == 0 {
+            tracing::info!("End of input");
             return Ok(());
         }
 
@@ -88,8 +92,10 @@ fn write_forever() -> Result<(), anyhow::Error> {
         let current_text = clipboard.get_text().ok();
 
         if Some(text.as_ref()) != current_text.as_ref().map(|s| s.as_str()) {
-            tracing::debug!("Writing to clipboard");
+            tracing::debug!(?text, "Writing to clipboard");
             clipboard.set_text(text)?;
+        } else {
+            tracing::debug!("Skipping identical input");
         }
     }
 }
