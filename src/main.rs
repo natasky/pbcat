@@ -13,20 +13,23 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 enum Message {
     ClipboardTextChanged { text: String },
     ReceivedText { text: String },
+    Exit,
 }
 
 impl Message {
-    fn text(&self) -> &str {
+    fn text(&self) -> Option<&str> {
         match self {
-            Message::ClipboardTextChanged { text } => &text,
-            Message::ReceivedText { text } => &text,
+            Message::ClipboardTextChanged { text } => Some(&text),
+            Message::ReceivedText { text } => Some(&text),
+            Message::Exit => None,
         }
     }
 
-    fn into_text(self) -> String {
+    fn into_text(self) -> Option<String> {
         match self {
-            Message::ClipboardTextChanged { text } => text,
-            Message::ReceivedText { text } => text,
+            Message::ClipboardTextChanged { text } => Some(text),
+            Message::ReceivedText { text } => Some(text),
+            Message::Exit => None,
         }
     }
 }
@@ -83,6 +86,8 @@ fn watch_input(output: mpsc::Sender<Message>) -> Result<()> {
         };
     }
 
+    let _ = output.send(Message::Exit);
+
     Ok(())
 }
 
@@ -122,7 +127,7 @@ fn handle_messages(input: mpsc::Receiver<Message>) -> Result<()> {
     let mut last_text: Option<String> = None;
 
     while let Ok(message) = input.recv() {
-        if last_text.as_ref().map(|s| s.as_str()) == Some(message.text()) {
+        if last_text.as_ref().map(|s| s.as_str()) == message.text() {
             tracing::debug!("No change");
             continue;
         }
@@ -136,9 +141,10 @@ fn handle_messages(input: mpsc::Receiver<Message>) -> Result<()> {
                 tracing::debug!(?text, "Writing to clipboard");
                 clipboard.set_text(text)?;
             }
+            Message::Exit => break,
         }
 
-        last_text = Some(message.into_text());
+        last_text = message.into_text();
     }
 
     Ok(())
