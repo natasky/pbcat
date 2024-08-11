@@ -1,20 +1,37 @@
+mod watch_clipboard;
+
+use anyhow::{anyhow, Result};
 use std::{
     io::{BufRead as _, Write as _},
+    sync::mpsc,
     time::Duration,
 };
 
-use clap::Parser;
-
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Parser)]
-struct Options {
-    // Write to clipboard instead of reading from it.
-    #[arg(long)]
-    write: bool,
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Message {
+    ClipboardTextChanged { text: String },
+    ReceivedText { text: String },
 }
 
-fn main() -> anyhow::Result<()> {
+impl Message {
+    fn text(&self) -> &str {
+        match self {
+            Message::ClipboardTextChanged { text } => &text,
+            Message::ReceivedText { text } => &text,
+        }
+    }
+
+    fn into_text(self) -> String {
+        match self {
+            Message::ClipboardTextChanged { text } => text,
+            Message::ReceivedText { text } => text,
+        }
+    }
+}
+
+fn main() -> Result<()> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::Subscriber::builder()
             .with_writer(std::io::stderr)
@@ -22,58 +39,28 @@ fn main() -> anyhow::Result<()> {
             .finish(),
     )?;
 
-    let options = Options::parse();
+    let (sender, receiver) = mpsc::channel::<Message>();
 
-    if options.write {
-        write_forever()?;
-    } else {
-        read_forever()?;
+    let threads = [
+        std::thread::spawn({
+            let sender = sender.clone();
+            move || watch_input(sender)
+        }),
+        std::thread::spawn(move || watch_clipboard_forever(sender)),
+        std::thread::spawn(move || handle_messages(receiver)),
+    ];
+
+    for thread in threads {
+        thread
+            .join()
+            .map_err(|err| anyhow!("thread panicked: {:?}", err))??;
     }
 
     Ok(())
 }
 
-#[tracing::instrument(level = "info")]
-fn read_forever() -> Result<(), anyhow::Error> {
-    let mut clipboard = arboard::Clipboard::new()?;
-    let mut last_text: Option<String> = None;
-    let mut last_update_count = get_update_count();
-    tracing::info!("Started");
-
-    loop {
-        std::thread::sleep(POLL_INTERVAL);
-        let current_update_count = get_update_count();
-        tracing::trace!(current_update_count);
-
-        if current_update_count == last_update_count {
-            tracing::trace!("No update");
-            continue;
-        }
-
-        last_update_count = current_update_count;
-        let Ok(current_text) = clipboard.get_text() else {
-            // E.g. no text content.
-            tracing::debug!("No text");
-            continue;
-        };
-
-        if last_text.as_ref() == Some(&current_text) {
-            tracing::debug!("No change");
-            continue;
-        }
-
-        print!("{}\0", current_text);
-        std::io::stdout().flush()?;
-
-        last_text = Some(current_text)
-    }
-}
-
-#[tracing::instrument(level = "info")]
-fn write_forever() -> Result<(), anyhow::Error> {
-    let mut clipboard = arboard::Clipboard::new()?;
+fn watch_input(output: mpsc::Sender<Message>) -> Result<()> {
     let mut buffer = Vec::<u8>::new();
-    tracing::info!("Started");
 
     loop {
         buffer.clear();
@@ -88,36 +75,71 @@ fn write_forever() -> Result<(), anyhow::Error> {
             size -= 1;
         }
 
-        let text = String::from_utf8_lossy(&buffer[..size]);
-        let current_text = clipboard.get_text().ok();
+        let text = String::from_utf8_lossy(&buffer[..size]).into_owned();
 
-        if Some(text.as_ref()) != current_text.as_ref().map(|s| s.as_str()) {
-            tracing::debug!(?text, "Writing to clipboard");
-            clipboard.set_text(text)?;
-        } else {
-            tracing::debug!("Skipping identical input");
-        }
+        if let Ok(_) = output.send(Message::ReceivedText { text }) {
+            // Channel closed.
+            break;
+        };
     }
+
+    Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn get_update_count() -> u64 {
-    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() as u64 }
+fn watch_clipboard_forever(output: mpsc::Sender<Message>) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let mut last_update_count = watch_clipboard::get_update_count();
+
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+
+        let current_update_count = watch_clipboard::get_update_count();
+        tracing::trace!(current_update_count);
+
+        if current_update_count == last_update_count {
+            tracing::trace!("No update");
+            continue;
+        }
+
+        last_update_count = current_update_count;
+        let Ok(text) = clipboard.get_text() else {
+            // E.g. no text content.
+            tracing::debug!("No text");
+            continue;
+        };
+
+        let Ok(_) = output.send(Message::ClipboardTextChanged { text }) else {
+            // Channel closed.
+            break;
+        };
+    }
+
+    Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn get_update_count() -> u64 {
-    unsafe { objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64 }
-}
+fn handle_messages(input: mpsc::Receiver<Message>) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let mut last_text: Option<String> = None;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn get_update_count() -> u64 {
-    // Fallback just checks contents every second.
+    while let Ok(message) = input.recv() {
+        if last_text.as_ref().map(|s| s.as_str()) == Some(message.text()) {
+            tracing::debug!("No change");
+            continue;
+        }
 
-    use std::{cell::LazyCell, sync::Mutex, time::Instant};
+        match &message {
+            Message::ClipboardTextChanged { text } => {
+                print!("{}\0", text);
+                std::io::stdout().flush()?;
+            }
+            Message::ReceivedText { text } => {
+                tracing::debug!(?text, "Writing to clipboard");
+                clipboard.set_text(text)?;
+            }
+        }
 
-    static FIRST_CHECK_INSTANT: Mutex<LazyCell<Instant>> =
-        Mutex::new(LazyCell::new(|| Instant::now()));
+        last_text = Some(message.into_text());
+    }
 
-    FIRST_CHECK_INSTANT.lock().unwrap().elapsed().as_secs()
+    Ok(())
 }
